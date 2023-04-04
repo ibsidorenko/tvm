@@ -351,6 +351,71 @@ def test_qnn_legalize_qnn_conv2d_non_scalar_qnn_params():
         tvm.ir.assert_structural_equal(a, b)
 
 
+w_dtype = tvm.testing.parameter("uint8", "int8")
+c_dim = tvm.testing.parameter(32, 31)
+
+
+def test_qnn_legalize_qnn_conv2d(w_dtype, c_dim):
+    """
+    Test QNN legalization for qnn.conv2d op for Hexagon target: check uint8 x int8 --> uint8 x uint8
+    conversion for VRMPY u8u8 legaliztion when number of input channels is (or is not) multiple of 4
+    """
+    data_shape = (1, c_dim, 16, 16)
+    weights_shape = (64, c_dim, 3, 3)
+    data = relay.var("data", shape=data_shape, dtype="uint8")
+    weights = relay.var("weight", shape=weights_shape, dtype=w_dtype)
+    data_zp = relay.const(2)
+    data_scale = relay.const(0.15)
+    kernel_scale = relay.const(0.21)
+
+    def before():
+        return relay.qnn.op.conv2d(
+            data,
+            weights,
+            input_zero_point=data_zp,
+            kernel_zero_point=relay.const(1),
+            input_scale=data_scale,
+            kernel_scale=kernel_scale,
+            channels=weights_shape[0],
+            kernel_size=[3, 3],
+        )
+
+    def expected():
+        if c_dim % 4 != 0:
+            op0 = relay.nn.pad(weights, pad_width=[[0, 0], [0, 1], [0, 0], [0, 0]])
+            op1 = relay.nn.pad(data, pad_width=[[0, 0], [0, 1], [0, 0], [0, 0]])
+        else:
+            op0 = weights
+            op1 = data
+
+        if w_dtype == "int8":
+            op2 = relay.cast(op0, dtype="int16")
+            op3 = relay.add(op2, relay.const(128, dtype="int16"))
+            op4 = relay.cast(op3, dtype="uint8")
+            weights_zp = relay.const(129)
+        else:
+            op4 = op0
+            weights_zp = relay.const(1)
+
+        op5 = relay.qnn.op.conv2d(
+            op1,
+            op4,
+            input_zero_point=data_zp,
+            kernel_zero_point=weights_zp,
+            input_scale=data_scale,
+            kernel_scale=kernel_scale,
+            channels=weights_shape[0],
+            kernel_size=[3, 3],
+        )
+        return op5
+
+    target = tvm.target.hexagon("v68")
+    with tvm.target.Target(target):
+        a = run_opt_pass(before(), relay.qnn.transform.Legalize())
+        b = run_infer_type(expected())
+        tvm.ir.assert_structural_equal(a, b)
+
+
 def test_qnn_legalize_qnn_dense_non_scalar_qnn_params():
     """
     Test QNN legalization for qnn.dense op for Hexagon target when kernel zero point and kernel
@@ -387,8 +452,4 @@ def test_qnn_legalize_qnn_dense_non_scalar_qnn_params():
 
 
 if __name__ == "__main__":
-    test_qnn_legalize()
-    test_qnn_legalize_qnn_conv2d()
-    test_qnn_legalize_qnn_dense()
-    test_qnn_legalize_qnn_conv2d_non_scalar_qnn_params()
-    test_qnn_legalize_qnn_dense_non_scalar_qnn_params()
+    tvm.testing.main()

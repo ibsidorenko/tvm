@@ -154,7 +154,7 @@ def get_scalar_from_constant(expr):
     return value.item(0)
 
 
-def _shift(data, zero_point, out_dtype):
+def _shift(data, zero_point, out_dtype, dtype="int32"):
     """Shifts (add/subtracts) the qnn tensor with +/-128)"""
     if out_dtype == "uint8":
         shift = 128
@@ -162,8 +162,8 @@ def _shift(data, zero_point, out_dtype):
         shift = -128
     else:
         raise ValueError("Unsupported out dtype.")
-    data_modified = relay.cast(data, "int32")
-    data_modified = relay.add(data_modified, relay.const(shift, "int32"))
+    data_modified = relay.cast(data, dtype)
+    data_modified = relay.add(data_modified, relay.const(shift, dtype))
     data_modified = relay.cast(data_modified, out_dtype)
     if isinstance(zero_point, relay.Constant):
         zero_point_val = get_scalar_from_constant(zero_point)
@@ -382,12 +382,12 @@ def helper_change_dtypes_to_uint8(attrs, inputs, types, relay_op):
     # Shift input if necessary.
     if data_dtype == "int8":
         # Compute (QA + 128) and (zp_a + 128)
-        data, input_zero_point = _shift(data, input_zero_point, "uint8")
+        data, input_zero_point = _shift(data, input_zero_point, "uint8", dtype="int16")
 
     # Shift kernel if necessary.
     if kernel_dtype == "int8":
         # Compute (QA + 128) and (zp_a + 128)
-        kernel, kernel_zero_point = _shift(kernel, kernel_zero_point, "uint8")
+        kernel, kernel_zero_point = _shift(kernel, kernel_zero_point, "uint8", dtype="int16")
 
     # Call qnn.conv2d/qnn.dense with modified inputs and zero points.
     new_attrs = dict(attrs)
@@ -555,6 +555,9 @@ def _qnn_dense_legalize_cuda(attrs, inputs, types):
 IN_CHANNEL_VECTOR_LENGTH = 4
 OUT_CHANNEL_VECTOR_LENGTH = 32
 
+# Do vrmpy legalization: qnn.conv2d(u8, i8) --> qnn.conv2d(u8, u8)
+DO_KERNEL_TYPE_CONVERSION = True
+
 
 @qnn_conv2d_legalize.register("hexagon")
 def _qnn_conv2d_legalize_hexagon(attrs, inputs, types):
@@ -578,6 +581,9 @@ def _qnn_conv2d_legalize_hexagon(attrs, inputs, types):
         oc_modified = False
         data, kernel, data_zp, kernel_zp, data_scale, kernel_scale = inputs
 
+        #out = helper_change_dtypes_to_uint8(attrs, inputs, types, relay.qnn.op.conv2d)
+
+        new_in_channel = in_channel
         if in_channel % IN_CHANNEL_VECTOR_LENGTH != 0:
             new_in_channel = helper_align_up(in_channel, IN_CHANNEL_VECTOR_LENGTH)
             diff = new_in_channel - in_channel
@@ -618,11 +624,34 @@ def _qnn_conv2d_legalize_hexagon(attrs, inputs, types):
                 original_out_shape = list(output_tensor.shape)
                 out = relay.strided_slice(out, begin=[0, 0, 0, 0], end=original_out_shape)
             else:
-                out = relay.qnn.op.conv2d(
-                    data, kernel, data_zp, kernel_zp, data_scale, kernel_scale, **new_attrs
-                )
+                #out = relay.qnn.op.conv2d(
+                #    data, kernel, data_zp, kernel_zp, data_scale, kernel_scale, **new_attrs
+                #)
+                if DO_KERNEL_TYPE_CONVERSION is True:
+                    new_inputs = [data, kernel, data_zp, kernel_zp, data_scale, kernel_scale]
+                    new_data_shape = [data_tensor.shape[0], new_in_channel, *data_tensor.shape[2:]]
+                    new_kernel_shape = [
+                        kernel_tensor.shape[0], new_in_channel, *kernel_tensor.shape[2:]
+                    ]
+                    new_types = [
+                        relay.TensorType(new_data_shape, data_tensor.dtype),
+                        relay.TensorType(new_kernel_shape, kernel_tensor.dtype),
+                        *types[2:],
+                    ]
+                    out = helper_change_dtypes_to_uint8(
+                        new_attrs, new_inputs, new_types, relay.qnn.op.conv2d
+                    )
+                    if out is None:
+                        out = relay.qnn.op.conv2d(*new_inputs, **new_attrs)
+                else:
+                    out = relay.qnn.op.conv2d(
+                        data, kernel, data_zp, kernel_zp, data_scale, kernel_scale, **new_attrs
+                    )
 
             return out
+
+        elif DO_KERNEL_TYPE_CONVERSION is True:
+            return helper_change_dtypes_to_uint8(attrs, inputs, types, relay.qnn.op.conv2d)
 
     return None
 

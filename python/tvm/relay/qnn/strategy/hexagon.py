@@ -142,7 +142,7 @@ def qnn_conv2d_strategy_hexagon(attrs, inputs, out_type, target):
                 name="qnn_conv2d.hexagon",
             )
         elif NCHWC_MATCHER.match(data_layout) and OIHWIOI_MATCHER.match(kernel_layout):
-            if data.dtype == "uint8" and kernel.dtype == "int8":
+            if data.dtype == "uint8" and  "int8" in kernel.dtype:
                 strategy.add_implementation(
                     wrap_topi_qnn_conv2d(topi.hexagon.qnn_conv2d_NCHWc_int8),
                     wrap_topi_schedule(topi.hexagon.schedule_qnn_conv2d_NCHWc_int8),

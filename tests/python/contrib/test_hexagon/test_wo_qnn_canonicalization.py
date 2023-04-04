@@ -153,6 +153,137 @@ def test_qnn_conv2d_rq(hexagon_session: Session):
     np.testing.assert_equal(hexagon_output, llvm_out)
 
 
+class TestQnnConv2d:
+    """QNN conv2d op test class."""
+
+    dtype = tvm.testing.parameter("uint8", "int8")
+    c_dim = tvm.testing.parameter(3, 8)
+
+    @tvm.testing.requires_hexagon
+    def test_qnn_conv2d_add_requantize(self, hexagon_session: Session, dtype, c_dim):
+        """Check lowering of qnn.conv2d + bias_add + qnn.requantize
+        dtype: type of weights
+        c_dim: C dimension of weights, need to check cases when it is multiple of 32 and not.
+        """
+        data_shape = [1, c_dim, 16, 16]
+        weight_shape = [64, c_dim, 3, 3]
+        bias_shape = [64]
+        data = relay.var("data", shape=data_shape, dtype="uint8")
+        weights = relay.var("weight", shape=weight_shape, dtype=dtype)
+        bias = relay.var("bias", shape=bias_shape, dtype="int32")
+
+        op0 = relay.qnn.op.conv2d(
+            data,
+            weights,
+            input_zero_point=relay.const(2),
+            kernel_zero_point=relay.const(0),
+            input_scale=relay.const(0.3),
+            kernel_scale=relay.const(0.4),
+            channels=64,
+            kernel_size=[3, 3],
+        )
+        op1 = relay.nn.bias_add(op0, bias)
+        op2 = relay.qnn.op.requantize(
+            op1,
+            input_scale=relay.const(1.3),
+            input_zero_point=relay.const(0),
+            output_scale=relay.const(8.7),
+            output_zero_point=relay.const(1),
+            out_dtype="uint8",
+        )
+        relay_mod = tvm.IRModule.from_expr(op2)
+
+        # Compile for Hexagon
+        hexagon_lowered = build_hexagon_module(relay_mod)
+
+        # Reference compilation
+        llvm_lowered = build_ref_module(relay_mod)
+
+        np.random.seed(0)
+
+        data_np = np.random.randint(2, 8, size=data_shape, dtype="uint8")
+        weight_np = np.random.randint(0, 8, size=weight_shape, dtype=dtype)
+        bias_np = np.random.randint(-10, 10, size=bias_shape, dtype="int32")
+        inputs = {"data": data_np, "weight": weight_np, "bias": bias_np}
+
+        hx_m = hexagon_session.get_executor_from_factory(hexagon_lowered)
+        hexagon_output = execute(hx_m, inputs)
+
+        llvm_m = tvm.runtime.executor.AotModule(llvm_lowered["default"](tvm.cpu(0)))
+        llvm_out = execute(llvm_m, inputs)
+
+        # Diff by 1 is Ok.
+        tvm.testing.assert_allclose(hexagon_output, llvm_out, atol=1)
+
+
+    @tvm.testing.requires_hexagon
+    def test_qqq(self, hexagon_session: Session):
+        """Check lowering of qnn.conv2d + bias_add + qnn.requantize
+        dtype: type of weights
+        c_dim: C dimension of weights, need to check cases when it is multiple of 32 and not.
+        """
+        dtype = "int8"
+        data_shape = [1, 32, 16, 16]
+        weight_shape = [64, 32, 1, 1]
+        bias_shape = [64]
+        data = relay.var("data", shape=data_shape, dtype="uint8")
+        weights = relay.var("weight", shape=weight_shape, dtype=dtype)
+        bias = relay.var("bias", shape=bias_shape, dtype="int32")
+
+        op0 = relay.qnn.op.conv2d(
+            data,
+            weights,
+            input_zero_point=relay.const(0),
+            kernel_zero_point=relay.const(0),
+            input_scale=relay.const(0.3),
+            kernel_scale=relay.const(0.4),
+            channels=64,
+            kernel_size=[1, 1],
+        )
+        #op1 = relay.nn.bias_add(op0, bias)
+        op2 = relay.qnn.op.requantize(
+            op0,
+            input_scale=relay.const(1.3),
+            input_zero_point=relay.const(0),
+            output_scale=relay.const(1.3),
+            output_zero_point=relay.const(0),
+            out_dtype="uint8",
+        )
+        relay_mod = tvm.IRModule.from_expr(op0)
+
+        # Compile for Hexagon
+        hexagon_lowered = build_hexagon_module(relay_mod)
+
+        # Reference compilation
+        llvm_lowered = build_ref_module(relay_mod)
+
+        np.random.seed(0)
+
+        data_np = np.ones(data_shape, dtype="uint8")
+        weight_np = np.random.randint(-1, 8, size=weight_shape, dtype=dtype)
+        inputs = {"data": data_np, "weight": weight_np}
+
+        print(weight_np.reshape([64, 32]))
+        mysum = 0
+        for i in range(32):
+            print(weight_np[0, i, 0, 0])
+            mysum += weight_np[0, i, 0, 0]
+        print("my sum = ", mysum)
+
+        hx_m = hexagon_session.get_executor_from_factory(hexagon_lowered)
+        hexagon_output = execute(hx_m, inputs)
+
+        print(hexagon_output)
+
+        llvm_m = tvm.runtime.executor.AotModule(llvm_lowered["default"](tvm.cpu(0)))
+        llvm_out = execute(llvm_m, inputs)
+
+        print(llvm_out)
+
+        # Diff by 1 is Ok.
+        tvm.testing.assert_allclose(hexagon_output, llvm_out, atol=1)
+
+
 class TestQnnDense:
     """QNN dense op test class."""
 
