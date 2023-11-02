@@ -21,6 +21,7 @@
 from . import _op_gradient, builtin, ccl, distributed, grad, image, memory, nn, op_attrs
 
 # Operators
+from .annotate import smooth, absmax
 from .base import (
     assert_op,
     call_builtin_with_ctx,
